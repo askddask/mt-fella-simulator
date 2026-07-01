@@ -18,9 +18,12 @@ window.Physics = (() => {
 
   // Pole plant — two-part action: Shift arms it, then a weight shift (edge change)
   // must follow within POLE_TIMING_WINDOW seconds to count as correct.
-  const POLE_SPEED_BONUS   = 1.4;  // m/s instant speed boost on correct pole plant
-  const POLE_TIMING_WINDOW = 0.2;  // seconds allowed between pole plant and weight shift
-  const POLE_PLANT_COOLDOWN = 0.25; // seconds before another pole plant can be armed
+  const POLE_SPEED_BONUS    = 1 / 3.6; // 1 km/h instant speed boost on correct pole plant
+  const POLE_TIMING_WINDOW  = 0.2;     // seconds allowed between pole plant and weight shift
+  const POLE_PLANT_COOLDOWN = 0.25;    // seconds before another pole plant can be armed
+  const POLE_TURN_BOOST_MULT     = 1.9; // ski heading turns this much faster during the boost window
+  const POLE_TURN_BOOST_DURATION = 0.5; // seconds the tighter-turn window lasts after a correct plant
+  const POLE_PLANT_VISUAL_DURATION = 0.3; // seconds the "dig in" pole-dip animation plays
 
   // Ollie
   const OLLIE_CHARGE_RATE   = 1.0;  // charge units/s while Space held
@@ -61,6 +64,9 @@ window.Physics = (() => {
     polePlantArmedTimer: 0,    // seconds since armed
     polePlantAttempted: false, // pulses true the tick a pole plant is armed (for scoring)
     polePlantSucceeded: false, // pulses true the tick the follow-up weight shift confirms it
+    polePlantTurnBoostTimer: 0,  // counts down after a correct plant; tightens the turn while active
+    polePlantVisualTimer: 0,     // counts down for the "dig in" pole-dip render animation
+    polePlantVisualSide: 0,      // -1 = left pole dips, +1 = right pole dips (set when armed)
     lastEdge:            0,    // previous frame edge for detecting weight transfer
 
     // Ollie charge
@@ -106,6 +112,9 @@ window.Physics = (() => {
     state.polePlantArmedTimer = 0;
     state.polePlantAttempted = false;
     state.polePlantSucceeded = false;
+    state.polePlantTurnBoostTimer = 0;
+    state.polePlantVisualTimer = 0;
+    state.polePlantVisualSide = 0;
     state.lastEdge = 0;
     state.ollieCharge = 0;
     state.olliePenaltyBled = 0;
@@ -150,18 +159,27 @@ window.Physics = (() => {
 
     // ── Pole plant (two-part action) ─────────────────────────────────────
     // Shift arms the pole plant; a weight shift within POLE_TIMING_WINDOW seconds
-    // confirms it as "correct" (speed boost + points). Without the follow-through
-    // in time, the pole plant expires with no bonus.
+    // confirms it as "correct" (speed boost + tighter turn + points). Without the
+    // follow-through in time, the pole plant expires with no bonus.
     state.polePlantAttempted = false;
     state.polePlantSucceeded = false;
 
-    if (state.polePlantCooldown > 0) state.polePlantCooldown -= dt;
+    if (state.polePlantCooldown > 0)      state.polePlantCooldown -= dt;
+    if (state.polePlantTurnBoostTimer > 0) state.polePlantTurnBoostTimer -= dt;
+    if (state.polePlantVisualTimer > 0)    state.polePlantVisualTimer -= dt;
 
     if (inputState.polePlantJustPressed && state.polePlantCooldown <= 0 && !state.airborne) {
       state.polePlantArmed      = true;
       state.polePlantArmedTimer = 0;
       state.polePlantCooldown   = POLE_PLANT_COOLDOWN;
       state.polePlantAttempted  = true;
+
+      // Visual cue: the downhill (leading) pole dips toward the snow.
+      // skiAngle > 0 (nose right of fall line) rotates the left side forward/downhill.
+      if (state.skiAngle > 0)      state.polePlantVisualSide = -1; // left leads
+      else if (state.skiAngle < 0) state.polePlantVisualSide =  1; // right leads
+      // skiAngle === 0: keep whichever side led last time
+      state.polePlantVisualTimer = POLE_PLANT_VISUAL_DURATION;
     }
 
     if (state.polePlantArmed) {
@@ -172,8 +190,11 @@ window.Physics = (() => {
           state.vx *= factor;
           state.vy *= factor;
         }
-        state.polePlantSucceeded = true;
-        state.polePlantArmed     = false;
+        state.polePlantSucceeded    = true;
+        state.polePlantArmed        = false;
+        // Correct timing tightens the turn: the player is switching skis and
+        // should be able to carve a tighter arc than a normal edge change allows.
+        state.polePlantTurnBoostTimer = POLE_TURN_BOOST_DURATION;
       } else {
         state.polePlantArmedTimer += dt;
         if (state.polePlantArmedTimer > POLE_TIMING_WINDOW) {
@@ -241,22 +262,25 @@ window.Physics = (() => {
 
     // ── Ski heading rotation from edge grip ──────────────────────────────
     if (!state.airborne && state.edgeLoaded !== 0) {
-      // Edge loaded → ski arc: rotate ski angle toward the carved direction
-      // edgeLoaded -1 (left edge) → skis turn right (angle decreases from 0)
-      // edgeLoaded +1 (right edge) → skis turn left (angle increases)
-      // "turnDirection" for carve: left edge digs → skier arcs right → skiAngle goes toward negative
-      const turnDir = -state.edgeLoaded;  // -1 → left edge → turn right → skiAngle negative direction...
-      // Actually: left arrow = weight left ski = left edge = carve right = ski nose swings right
-      // Let's define skiAngle as angle of travel direction from fall line (+Y)
-      // positive skiAngle = facing right of fall line
-      // Left edge → carve right → skiAngle increases (nose goes right)
-      // Right edge → carve left → skiAngle decreases (nose goes left)
+      // skiAngle is the travel direction relative to the fall line (+Y);
+      // positive skiAngle = nose pointing right of fall line.
+      // Weighting a ski loads its carving (inside) edge, which arcs you
+      // toward the OPPOSITE side: weight left ski (edgeLoaded -1) carves
+      // right (skiAngle increases), weight right ski (edgeLoaded +1)
+      // carves left (skiAngle decreases) — real ski technique, not a
+      // direct "left arrow = go left" mapping.
 
       // Speed factor: faster = stronger edge effect (up to a reasonable cap)
       const spd = Math.sqrt(state.vx * state.vx + state.vy * state.vy);
       const spdFactor = Math.min(spd / 5.0, 1.5);
 
-      state.skiAngle += state.edgeLoaded * EDGE_TURN_RATE * spdFactor * dt;
+      // A correct pole plant tightens the turn radius for a short window afterward —
+      // this is what lets a well-timed switch carve a tighter arc than a bare edge change.
+      const turnRate = state.polePlantTurnBoostTimer > 0
+        ? EDGE_TURN_RATE * POLE_TURN_BOOST_MULT
+        : EDGE_TURN_RATE;
+
+      state.skiAngle += -state.edgeLoaded * turnRate * spdFactor * dt;
 
       // Clamp ski angle to avoid full reversal in normal carving
       state.skiAngle = Math.max(-Math.PI * 0.7, Math.min(Math.PI * 0.7, state.skiAngle));

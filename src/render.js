@@ -23,6 +23,13 @@ window.Render = (() => {
   // Smoothed edge tilt for the skier rig (avoids a hard snap between -1/0/1)
   let visualEdgeTilt = 0;
 
+  // Pole "dig in" dip animation — must match physics.js POLE_PLANT_VISUAL_DURATION
+  const POLE_PLANT_VISUAL_DURATION = 0.3;
+  const POLE_BASE_ROT_X = 0.5;
+  const POLE_BASE_Y     = 0.55;
+  const POLE_DIP_ROT_X  = 0.7;
+  const POLE_DIP_Y      = 0.32;
+
   // World-space (x, y-downhill, elevation) -> Three.js (X, Y-up, Z)
   function worldToThree(x, y, elevation, out) {
     out.set(x, elevation, -y);
@@ -242,6 +249,18 @@ window.Render = (() => {
     const polesVisible = !physState.airborne;
     skierParts.poleLeft.visible  = polesVisible;
     skierParts.poleRight.visible = polesVisible;
+
+    // Pole plant "dig in": the downhill/leading pole jerks down toward the snow
+    // briefly, showing which pole is being planted.
+    const dipT = physState.polePlantVisualTimer;
+    const dipAmt = dipT > 0 ? Math.sin(Math.PI * (1 - dipT / POLE_PLANT_VISUAL_DURATION)) : 0;
+    const leftDip  = physState.polePlantVisualSide === -1 ? dipAmt : 0;
+    const rightDip = physState.polePlantVisualSide ===  1 ? dipAmt : 0;
+
+    skierParts.poleLeft.rotation.x  = POLE_BASE_ROT_X + leftDip  * POLE_DIP_ROT_X;
+    skierParts.poleLeft.position.y  = POLE_BASE_Y     - leftDip  * POLE_DIP_Y;
+    skierParts.poleRight.rotation.x = POLE_BASE_ROT_X + rightDip * POLE_DIP_ROT_X;
+    skierParts.poleRight.position.y = POLE_BASE_Y     - rightDip * POLE_DIP_Y;
   }
 
   // ── Camera ────────────────────────────────────────────────────────────────

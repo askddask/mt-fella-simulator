@@ -86,6 +86,16 @@ window.Terrain = (() => {
   let mogulsByField = [];
   const moguls = []; // flat list, kept for render.js / debugging
 
+  // Rows are staggered (brick-laid) so consecutive layers offset by half the
+  // row's mogul spacing: a mogul in row N+1 sits in the gap between two
+  // moguls in row N. That blocks any straight fall-line path through the
+  // field (a row-N gap always has a row-N+1 mogul behind it) while still
+  // leaving a wide diagonal weave lane on either side of each bump — enough
+  // room to carve around one mogul without clipping its neighbors.
+  const MOGUL_ROW_SPACING = 4.2;   // meters between rows (Y)
+  const MOGUL_X_SPACING   = 4.6;   // meters between bumps within a row (X)
+  const MOGUL_JITTER      = 0.4;   // small organic wobble, doesn't break the stagger
+
   function buildMoguls() {
     moguls.length = 0;
     mogulsByField = [];
@@ -94,12 +104,14 @@ window.Terrain = (() => {
 
     for (const field of MOGUL_FIELDS) {
       const bumps = [];
-      for (let y = field.yStart; y < field.yEnd; y += 3.2) {
-        for (let x = -TRAIL_HALF + 4; x <= TRAIL_HALF - 4; x += 3.6) {
+      let row = 0;
+      for (let y = field.yStart; y < field.yEnd; y += MOGUL_ROW_SPACING, row++) {
+        const xOffset = (row % 2) * (MOGUL_X_SPACING / 2);
+        for (let x = -TRAIL_HALF + 4 + xOffset; x <= TRAIL_HALF - 4; x += MOGUL_X_SPACING) {
           const bump = {
-            x: x + (rand() - 0.5) * 1.4,
-            y: y + (rand() - 0.5) * 1.4,
-            radius: 1.3 + rand() * 0.5,   // ~1.3-1.8m — tiny, not the old 3.5-5.5m
+            x: x + (rand() - 0.5) * MOGUL_JITTER,
+            y: y + (rand() - 0.5) * MOGUL_JITTER,
+            radius: 1.2 + rand() * 0.3,   // ~1.2-1.5m — tiny, not the old 3.5-5.5m
             height: 0.35 + rand() * 0.25, // ~0.35-0.6m
           };
           bumps.push(bump);
