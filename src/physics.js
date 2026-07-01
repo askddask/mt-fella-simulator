@@ -6,8 +6,8 @@ window.Physics = (() => {
 
   // ─── Tuning constants (retune here after playtesting) ───────────────────
   const GRAVITY          = 9.8;    // m/s² base gravity
-  const SLOPE_ANGLE      = 0.18;   // radians — gentle tutorial pitch (~10°)
-  const SLOPE_GRAVITY    = GRAVITY * Math.sin(SLOPE_ANGLE);  // acceleration down the fall line
+  // Slope steepness is no longer a constant — it's sampled per-tick from terrain.getLocalGrade()
+  // so steeper patches accelerate the skier and flatter patches let them slow.
 
   // Edge grip: how strongly the ski arc force pushes velocity perpendicular to ski heading
   const EDGE_GRIP        = 2.8;    // higher = tighter carve arc, feels more responsive
@@ -16,9 +16,11 @@ window.Physics = (() => {
   const KINETIC_FRICTION = 0.08;   // base rolling/gliding friction always present
   const MAX_SPEED        = 22;     // m/s hard cap (~79 km/h) — keeps sim sane
 
-  // Pole plant
-  const POLE_SPEED_BONUS = 1.4;    // m/s instant speed boost on correct pole plant
-  const POLE_TIMING_WINDOW = 0.18; // seconds around the weight-transfer moment for "correct" timing
+  // Pole plant — two-part action: Shift arms it, then a weight shift (edge change)
+  // must follow within POLE_TIMING_WINDOW seconds to count as correct.
+  const POLE_SPEED_BONUS   = 1.4;  // m/s instant speed boost on correct pole plant
+  const POLE_TIMING_WINDOW = 0.2;  // seconds allowed between pole plant and weight shift
+  const POLE_PLANT_COOLDOWN = 0.25; // seconds before another pole plant can be armed
 
   // Ollie
   const OLLIE_CHARGE_RATE   = 1.0;  // charge units/s while Space held
@@ -53,10 +55,13 @@ window.Physics = (() => {
     // Which edge is loaded: -1 = left, 0 = flat, +1 = right
     edgeLoaded: 0,
 
-    // Pole plant state
-    polePlantCooldown:   0,    // seconds until next pole plant is eligible
+    // Pole plant state (two-part: Shift arms it, weight shift within the window confirms it)
+    polePlantCooldown: 0,      // seconds until another pole plant can be armed
+    polePlantArmed:    false,  // true while waiting for the follow-up weight shift
+    polePlantArmedTimer: 0,    // seconds since armed
+    polePlantAttempted: false, // pulses true the tick a pole plant is armed (for scoring)
+    polePlantSucceeded: false, // pulses true the tick the follow-up weight shift confirms it
     lastEdge:            0,    // previous frame edge for detecting weight transfer
-    weightTransferTimer: 0,    // counts up after edge change; used for timing window
 
     // Ollie charge
     ollieCharge:       0,
@@ -97,8 +102,11 @@ window.Physics = (() => {
     state.skiAngle = 0;
     state.edgeLoaded = 0;
     state.polePlantCooldown = 0;
+    state.polePlantArmed = false;
+    state.polePlantArmedTimer = 0;
+    state.polePlantAttempted = false;
+    state.polePlantSucceeded = false;
     state.lastEdge = 0;
-    state.weightTransferTimer = 0;
     state.ollieCharge = 0;
     state.olliePenaltyBled = 0;
     state.crashed = false;
@@ -116,6 +124,7 @@ window.Physics = (() => {
       if (state.crashTimer <= 0) {
         reset();
         terrain.reset();
+        window.Render.resetCamera();
       }
       return;
     }
@@ -135,36 +144,43 @@ window.Physics = (() => {
     else if (inputState.weightRight && !inputState.weightLeft)  newEdge =  1;  // weight on right ski → left arc
     // Both or neither = flat ski
 
-    // Detect weight transfer (edge flip: loaded edge changed and neither was 0 transitional)
-    const weightTransfer = (state.lastEdge !== 0 && newEdge !== 0 && newEdge !== state.lastEdge);
-    if (weightTransfer) {
-      state.weightTransferTimer = 0;
-    } else {
-      state.weightTransferTimer += dt;
-    }
+    // Weight shift = the loaded edge just changed (including from flat), one-tick pulse.
+    const weightShifted = (newEdge !== state.lastEdge && newEdge !== 0);
     state.edgeLoaded = newEdge;
 
-    // ── Pole plant ───────────────────────────────────────────────────────
+    // ── Pole plant (two-part action) ─────────────────────────────────────
+    // Shift arms the pole plant; a weight shift within POLE_TIMING_WINDOW seconds
+    // confirms it as "correct" (speed boost + points). Without the follow-through
+    // in time, the pole plant expires with no bonus.
+    state.polePlantAttempted = false;
+    state.polePlantSucceeded = false;
+
     if (state.polePlantCooldown > 0) state.polePlantCooldown -= dt;
 
-    if (inputState.polePlant && state.polePlantCooldown <= 0 && !state.airborne) {
-      // "Correct" timing: pole plant within POLE_TIMING_WINDOW after a weight transfer
-      if (weightTransfer || state.weightTransferTimer <= POLE_TIMING_WINDOW) {
-        // Correct timing: add speed and mark for scoring
+    if (inputState.polePlantJustPressed && state.polePlantCooldown <= 0 && !state.airborne) {
+      state.polePlantArmed      = true;
+      state.polePlantArmedTimer = 0;
+      state.polePlantCooldown   = POLE_PLANT_COOLDOWN;
+      state.polePlantAttempted  = true;
+    }
+
+    if (state.polePlantArmed) {
+      if (weightShifted) {
         const spd = Math.sqrt(state.vx * state.vx + state.vy * state.vy);
         if (spd > 0.1) {
           const factor = (spd + POLE_SPEED_BONUS) / spd;
           state.vx *= factor;
           state.vy *= factor;
         }
-        state.lastPolePlantCorrect = true;
+        state.polePlantSucceeded = true;
+        state.polePlantArmed     = false;
       } else {
-        state.lastPolePlantCorrect = false;
+        state.polePlantArmedTimer += dt;
+        if (state.polePlantArmedTimer > POLE_TIMING_WINDOW) {
+          state.polePlantArmed = false; // expired — no bonus
+        }
       }
-      state.lastPolePlantTime = 0;
-      state.polePlantCooldown = 0.3;  // 300ms lockout to prevent spam
     }
-    if (state.lastPolePlantTime !== undefined) state.lastPolePlantTime += dt;
 
     // ── Ollie charge & release ───────────────────────────────────────────
     if (!state.airborne) {
@@ -253,9 +269,13 @@ window.Physics = (() => {
     // ── Velocity from slope gravity + edge grip ──────────────────────────
     if (!state.airborne) {
       // Fall-line gravity component: always pulls down the slope (+Y in world)
-      // When skis are across the fall line, edge scrape (flat ski drag) resists this
+      // When skis are across the fall line, edge scrape (flat ski drag) resists this.
+      // Local grade is sampled from the terrain's rolling undulation: steeper patches
+      // accelerate, flatter/cresting patches let the skier slow.
+      const localGrade = terrain.getLocalGrade(state.x, state.y);
+      const slopeGravity = GRAVITY * localGrade;
       const fallLineAlignment = Math.cos(state.skiAngle); // 1 = straight downhill, 0 = perpendicular
-      const slopeAccel = SLOPE_GRAVITY * fallLineAlignment;
+      const slopeAccel = slopeGravity * fallLineAlignment;
 
       // Apply along ski heading direction
       const skiDirX = Math.sin(state.skiAngle);   // X component of ski facing direction

@@ -5,13 +5,13 @@
 window.Scoring = (() => {
 
   // Score formula (documented here, not scattered):
-  //   liveScore = trickPoints + speedScore + poleScore
-  //   speedScore  = avgSpeedMps * 8          (at 10 m/s avg → 80 pts; grows with speed)
-  //   poleScore   = correctPolePlants * 25   (25 pts per clean pole plant)
-  //   trickPoints = accumulated ollie (100) + 360 (360) points
+  //   liveScore   = trickPoints + speedScore
+  //   speedScore  = avgSpeedMps * 8              (at 10 m/s avg → 80 pts; grows with speed)
+  //   trickPoints = accumulated pole plant (20) + ollie (100) + 360 (360) points
   // High score = max liveScore across runs (localStorage key: 'mtfella_hiscore')
 
   const LS_KEY = 'mtfella_hiscore';
+  const POLE_PLANT_POINTS = 20; // per correct (Shift then weight-shift within 0.2s) pole plant
 
   const state = {
     trickPoints:       0,
@@ -73,12 +73,16 @@ window.Scoring = (() => {
       state.switchDistanceM += spd * dt;
     }
 
-    // Pole plant tracking
-    if (inputState.polePlant && physState.lastPolePlantTime === 0) {
+    // Pole plant tracking (event-based: Shift arms it, weight shift within
+    // the timing window confirms it — see physics.js polePlantAttempted/Succeeded)
+    if (physState.polePlantAttempted) {
       state.totalPolePlants++;
-      if (physState.lastPolePlantCorrect) {
-        state.correctPolePlants++;
-      }
+    }
+    if (physState.polePlantSucceeded) {
+      state.correctPolePlants++;
+      state.trickPoints += POLE_PLANT_POINTS;
+      state.lastTrickLabel = `Pole Plant! +${POLE_PLANT_POINTS}`;
+      state.lastTrickTimer = 1.2;
     }
 
     // Trick points from tricks.js
@@ -98,8 +102,7 @@ window.Scoring = (() => {
 
     // Live score calculation
     const speedScore = state.avgSpeedMps * 8;
-    const poleScore  = state.correctPolePlants * 25;
-    state.liveScore  = Math.round(state.trickPoints + speedScore + poleScore);
+    state.liveScore  = Math.round(state.trickPoints + speedScore);
 
     // High score update
     if (state.liveScore > state.highScore) {

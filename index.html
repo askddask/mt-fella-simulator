@@ -7,11 +7,17 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #0d2a4a; display: flex; justify-content: center; align-items: center; height: 100vh; }
-    canvas { display: block; border: 2px solid #2a5a8a; }
+    #game-wrap { position: relative; width: 800px; height: 600px; border: 2px solid #2a5a8a; }
+    #game-canvas, #hud-canvas { position: absolute; top: 0; left: 0; display: block; }
+    #hud-canvas { pointer-events: none; }
   </style>
 </head>
 <body>
-  <canvas id="game-canvas"></canvas>
+  <div id="game-wrap">
+    <canvas id="game-canvas" width="800" height="600"></canvas>
+    <canvas id="hud-canvas" width="800" height="600"></canvas>
+  </div>
+  <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
   <script src="src/physics.js"></script>
   <script src="src/terrain.js"></script>
   <script src="src/input.js"></script>

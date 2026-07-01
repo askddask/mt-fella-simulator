@@ -1,31 +1,58 @@
 // Mt. Fella Simulator — terrain.js
-// Tutorial trail definition, tree placement, mogul layout, collision detection.
+// Trail geometry, rolling grade variance, mogul fields, tree placement, collision detection.
+// Pure world-space math — no rendering here. render.js consumes these functions to build the 3D scene.
 
 window.Terrain = (() => {
 
   // ─── Trail geometry ──────────────────────────────────────────────────────
-  // Trail runs straight down (world +Y). Width in meters.
-  // Trail is long enough that a clean run at ~8 m/s takes >40 seconds → 350m minimum.
-  const TRAIL_LENGTH     = 420;   // meters
-  const TRAIL_WIDTH      = 60;    // meters (plenty of room to experiment — 10s of drift to trees at full speed)
-  const TRAIL_HALF       = TRAIL_WIDTH / 2;
+  const TRAIL_LENGTH  = 420;   // meters
+  const TRAIL_WIDTH   = 60;    // meters
+  const TRAIL_HALF    = TRAIL_WIDTH / 2;
+  const FOREST_WIDTH   = 40;   // meters of forest rendered beyond each trail edge
 
-  // The trail centerline is always at x = 0 for this straight tutorial trail.
+  // ─── Base descending grade ───────────────────────────────────────────────
+  // Average pitch of the whole run. Local grade varies around this via undulation().
+  const BASE_SLOPE_ANGLE = 0.18;              // ~10°
+  const BASE_GRADE       = Math.tan(BASE_SLOPE_ANGLE);
+
+  // Absolute world elevation contributed by the steady downhill descent (y grows downhill).
+  function baseElevation(y) { return -y * BASE_GRADE; }
+
+  // ─── Rolling, organic undulation ─────────────────────────────────────────
+  // Layered low-frequency waves — gentle rolling terrain, NOT a flat slope.
+  // Steeper patches (where this pushes elevation down faster) accelerate the skier;
+  // flatter/cresting patches (elevation rising relative to base) let them slow.
+  function undulation(x, y) {
+    return (
+      Math.sin(y * 0.045 + x * 0.010 + 0.6) * 1.4 +
+      Math.sin(y * 0.017 - x * 0.023 + 2.4) * 2.2 +
+      Math.sin(x * 0.050 + y * 0.008 + 4.1) * 0.8
+    );
+  }
+
+  function undulationGradY(x, y) {
+    const e = 0.5;
+    return (undulation(x, y + e) - undulation(x, y - e)) / (2 * e);
+  }
+
+  // Local downhill "grade" (~sin(theta) for these gentle angles) at (x, y).
+  // Steeper terrain -> larger value -> more acceleration. Clamped well above the
+  // base kinetic friction coefficient (0.08) so the skier never stalls dead.
+  function getLocalGrade(x, y) {
+    const grade = BASE_GRADE - undulationGradY(x, y);
+    return Math.max(0.12, Math.min(0.5, grade));
+  }
 
   // ─── Trees ───────────────────────────────────────────────────────────────
-  // Trees placed along both edges with some random scatter.
-  // Seeded procedurally so they're consistent across resets.
   const trees = [];
 
   function buildTrees() {
     trees.length = 0;
-    // Simple deterministic pseudo-random using LCG so no Math.random()
     let seed = 12345;
     const rand = () => { seed = (seed * 1664525 + 1013904223) & 0xffffffff; return (seed >>> 0) / 0xffffffff; };
 
-    const spacing = 8;  // meters between tree clusters
+    const spacing = 8;
     for (let y = 20; y < TRAIL_LENGTH; y += spacing) {
-      // Left edge trees (negative x, beyond -TRAIL_HALF)
       for (let i = 0; i < 2; i++) {
         trees.push({
           x: -(TRAIL_HALF + 2 + rand() * 18),
@@ -34,7 +61,6 @@ window.Terrain = (() => {
           type: rand() > 0.3 ? 'pine' : 'bare',
         });
       }
-      // Right edge trees
       for (let i = 0; i < 2; i++) {
         trees.push({
           x: TRAIL_HALF + 2 + rand() * 18,
@@ -46,67 +72,72 @@ window.Terrain = (() => {
     }
   }
 
-  // ─── Moguls ──────────────────────────────────────────────────────────────
-  // Mogul: { x, y, radius, height }
-  // height = peak elevation above flat terrain (meters)
-  // Isolated moguls and one cluster requiring pole plant weaving
-  const moguls = [
-    // Isolated moguls (for ollie practice)
-    { x:  5, y:  80, radius: 4.5, height: 1.2 },
-    { x: -8, y: 130, radius: 4.0, height: 1.0 },
-    { x:  3, y: 190, radius: 5.0, height: 1.4 },
-
-    // Mogul cluster — requires pole-plant weaving (y: 250-310)
-    { x: -6, y: 250, radius: 3.5, height: 1.1 },
-    { x:  6, y: 265, radius: 3.5, height: 1.1 },
-    { x: -5, y: 280, radius: 3.5, height: 1.1 },
-    { x:  7, y: 295, radius: 3.5, height: 1.1 },
-    { x: -4, y: 310, radius: 3.5, height: 1.1 },
-
-    // Isolated mogul near bottom for last trick attempt
-    { x:  0, y: 360, radius: 5.5, height: 1.5 },
+  // ─── Mogul fields ─────────────────────────────────────────────────────────
+  // Tiny bumps packed into clustered fields with just enough gap to weave through
+  // via pole-plant weight transfers. Each bump's uphill (near) face reads as a
+  // launch ramp; landing back on that face = crash (see isLandingOnUphillFace).
+  const MOGUL_FIELDS = [
+    { yStart:  70, yEnd: 150 },
+    { yStart: 190, yEnd: 270 },
+    { yStart: 310, yEnd: 390 },
   ];
 
-  // ─── Camera state ────────────────────────────────────────────────────────
-  const camera = {
-    x: 0,    // world X the camera is centered on
-    y: 0,    // world Y the camera is centered on
-    smoothX: 0,
-    smoothY: 0,
-  };
-  const CAM_LEAD     = 12;    // meters ahead of skier the camera looks
-  const CAM_SMOOTH   = 0.12;  // lerp factor per physics tick (higher = snappier)
+  // Grouped by field for fast rejection when querying terrain height.
+  let mogulsByField = [];
+  const moguls = []; // flat list, kept for render.js / debugging
 
-  // ─── Public state ─────────────────────────────────────────────────────────
-  // terrainZ at skier position, set each tick in updateForSkier
-  let currentTerrainZ = 0;
+  function buildMoguls() {
+    moguls.length = 0;
+    mogulsByField = [];
+    let seed = 99991;
+    const rand = () => { seed = (seed * 1664525 + 1013904223) & 0xffffffff; return (seed >>> 0) / 0xffffffff; };
 
-  function init() {
-    buildTrees();
+    for (const field of MOGUL_FIELDS) {
+      const bumps = [];
+      for (let y = field.yStart; y < field.yEnd; y += 3.2) {
+        for (let x = -TRAIL_HALF + 4; x <= TRAIL_HALF - 4; x += 3.6) {
+          const bump = {
+            x: x + (rand() - 0.5) * 1.4,
+            y: y + (rand() - 0.5) * 1.4,
+            radius: 1.3 + rand() * 0.5,   // ~1.3-1.8m — tiny, not the old 3.5-5.5m
+            height: 0.35 + rand() * 0.25, // ~0.35-0.6m
+          };
+          bumps.push(bump);
+          moguls.push(bump);
+        }
+      }
+      mogulsByField.push({ yStart: field.yStart, yEnd: field.yEnd, bumps });
+    }
   }
 
-  function reset() {
-    camera.x       = 0;
-    camera.y       = 0;
-    camera.smoothX = 0;
-    camera.smoothY = 0;
-    currentTerrainZ = 0;
-  }
-
-  // Returns mogul elevation at world position (x, y) — smooth hill shape
-  function getTerrainZ(x, y) {
+  function mogulHeight(x, y) {
     let z = 0;
-    for (const m of moguls) {
-      const dx = x - m.x;
-      const dy = y - m.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < m.radius) {
-        // Smooth cosine hill
-        const t = dist / m.radius;
-        z = Math.max(z, m.height * 0.5 * (1 + Math.cos(Math.PI * t)));
+    for (const field of mogulsByField) {
+      if (y < field.yStart - 2.5 || y > field.yEnd + 2.5) continue;
+      for (const m of field.bumps) {
+        const dx = x - m.x, dy = y - m.y;
+        const dist2 = dx * dx + dy * dy;
+        const r2 = m.radius * m.radius;
+        if (dist2 < r2) {
+          const dist = Math.sqrt(dist2);
+          const t = dist / m.radius;
+          const h = m.height * 0.5 * (1 + Math.cos(Math.PI * t));
+          if (h > z) z = h;
+        }
       }
     }
     return z;
+  }
+
+  // Ground offset above the smooth base slope (undulation + mogul bumps).
+  // This is what physics.js uses for the skier's resting height / air collision.
+  function getTerrainZ(x, y) {
+    return undulation(x, y) + mogulHeight(x, y);
+  }
+
+  // Absolute world elevation — used for rendering the terrain mesh, trees, etc.
+  function getElevation(x, y) {
+    return baseElevation(y) + getTerrainZ(x, y);
   }
 
   // Returns true if position (x, y) is outside trail boundaries (in tree zone)
@@ -115,73 +146,56 @@ window.Terrain = (() => {
     return Math.abs(x) > TRAIL_HALF;
   }
 
-  // Returns mogul face normal Y component at (x, y) — negative means uphill face
-  // Used for crash-on-uphill-face detection when landing
+  // Returns the nearest mogul's face normal Y component at (x, y).
+  // Negative = uphill (near/approach) face, positive = downhill (far/exit) face.
   function getMogulFaceNormalY(x, y) {
-    // Find the mogul the skier is currently on
-    for (const m of moguls) {
-      const dx = x - m.x;
-      const dy = y - m.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < m.radius && dist > 0.1) {
-        // dy < 0 means skier is on the uphill (north) face of the mogul
-        // Uphill face normal points "backward up the slope" → negative dy side
-        return dy / dist;  // negative = uphill face, positive = downhill face
+    for (const field of mogulsByField) {
+      if (y < field.yStart - 3 || y > field.yEnd + 3) continue;
+      for (const m of field.bumps) {
+        const dx = x - m.x, dy = y - m.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < m.radius && dist > 0.1) {
+          return dy / dist;
+        }
       }
     }
     return 1; // flat terrain, no crash
   }
 
-  // Returns true if the skier is landing on a mogul's uphill face
+  // Returns true if the skier is landing on a mogul's uphill face (= crash).
   function isLandingOnUphillFace(x, y) {
     const normalY = getMogulFaceNormalY(x, y);
-    return normalY < -0.3;  // threshold: uphill face if normal points significantly uphill
+    return normalY < -0.3;
   }
 
-  // Called each physics tick to update camera and feed terrainZ to physics state
-  function updateCamera(physState) {
-    // Camera target: slightly ahead of skier in direction of travel
-    const targetX = physState.x;
-    const targetY = physState.y + CAM_LEAD;
+  function init() {
+    buildTrees();
+    buildMoguls();
+  }
 
-    camera.smoothX += (targetX - camera.smoothX) * CAM_SMOOTH;
-    camera.smoothY += (targetY - camera.smoothY) * CAM_SMOOTH;
-    camera.x = camera.smoothX;
-    camera.y = camera.smoothY;
+  function reset() {
+    // Trail geometry is static across runs — nothing to reset here.
+  }
 
-    // Update terrain Z for physics
-    currentTerrainZ = getTerrainZ(physState.x, physState.y);
-    physState.terrainZ = currentTerrainZ;
+  // Called each physics tick: feeds terrainZ to physics state and checks
+  // tree / end-of-trail collisions. (Camera is owned entirely by render.js.)
+  function updateForSkier(physState) {
+    physState.terrainZ = getTerrainZ(physState.x, physState.y);
 
-    // Tree collision check
     if (isInTree(physState.x, physState.y) && physState.started && !physState.crashed) {
       window.Physics.crash();
     }
 
-    // End-of-trail check — reset when skier reaches bottom
     if (physState.y > TRAIL_LENGTH && physState.started && !physState.crashed) {
-      // Treat like a crash (just resets to top) — could show "nice run!" later
       window.Physics.crash();
     }
   }
 
-  // World → screen transform (called by render.js)
-  function worldToScreen(wx, wy, canvas) {
-    const scale = window.Physics.WORLD_SCALE;
-    const cx = canvas.width  / 2;
-    const cy = canvas.height * 0.45;   // skier appears ~45% down screen
-    return {
-      x: cx + (wx - camera.x) * scale,
-      y: cy + (wy - camera.y) * scale,
-    };
-  }
-
   return {
-    init, reset, updateCamera,
-    getTerrainZ, isInTree, isLandingOnUphillFace,
-    worldToScreen,
-    trees, moguls,
-    TRAIL_WIDTH, TRAIL_HALF, TRAIL_LENGTH,
-    camera,
+    init, reset, updateForSkier,
+    getTerrainZ, getElevation, baseElevation, getLocalGrade,
+    isInTree, isLandingOnUphillFace,
+    trees, moguls, MOGUL_FIELDS,
+    TRAIL_WIDTH, TRAIL_HALF, TRAIL_LENGTH, FOREST_WIDTH,
   };
 })();

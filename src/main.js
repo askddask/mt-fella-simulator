@@ -28,7 +28,7 @@ function tick(timestamp) {
     physics.update(PHYSICS_STEP, input.state, terrain);
     tricks.update(PHYSICS_STEP, input.state, physics.state);
     scoring.update(PHYSICS_STEP, physics.state, tricks.state, input.state);
-    terrain.updateCamera(physics.state);
+    terrain.updateForSkier(physics.state);
     accumulator -= PHYSICS_STEP;
     steps++;
   }
@@ -37,9 +37,8 @@ function tick(timestamp) {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  const canvas = document.getElementById('game-canvas');
-  canvas.width  = 800;
-  canvas.height = 600;
+  const canvas    = document.getElementById('game-canvas');
+  const hudCanvas = document.getElementById('hud-canvas');
 
   // Import order matters — modules assigned to window globals by their files
   input   = window.Input;
@@ -56,11 +55,12 @@ window.addEventListener('DOMContentLoaded', () => {
     tricks.reset();
     scoring.reset();
     terrain.reset();
+    render.resetCamera();
   };
 
   ui.init();
-  render.init(canvas);
   terrain.init();
+  render.init(canvas, hudCanvas, terrain);
   physics.init();
   input.init();
   tricks.init();

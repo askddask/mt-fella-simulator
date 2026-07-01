@@ -10,6 +10,7 @@ window.Input = (() => {
     weightLeft:    false,   // Left Arrow held
     weightRight:   false,   // Right Arrow held
     polePlant:     false,   // Shift held
+    polePlantJustPressed: false, // Shift just pressed (single-tick true) — arms the pole plant
     ollieCharging: false,   // Space held
     ollieRelease:  false,   // Space just released (single-tick true)
     spinLeft:      false,   // Left Arrow while airborne (handled in tricks.js)
@@ -18,6 +19,7 @@ window.Input = (() => {
   };
 
   let spaceWasDown = false;
+  let shiftWasDown = false;
 
   function init() {
     window.addEventListener('keydown', e => {
@@ -36,6 +38,7 @@ window.Input = (() => {
     state.weightLeft    = !!keys['ArrowLeft'];
     state.weightRight   = !!keys['ArrowRight'];
     state.polePlant     = !!keys['ShiftLeft'] || !!keys['ShiftRight'];
+    state.polePlantJustPressed = state.polePlant && !shiftWasDown;
     state.ollieCharging = spaceDown;
     state.ollieRelease  = spaceWasDown && !spaceDown;   // single-tick pulse
     state.spinLeft      = !!keys['ArrowLeft'];
@@ -44,11 +47,13 @@ window.Input = (() => {
     if (state.weightLeft || state.weightRight) state.anyInput = true;
 
     spaceWasDown = spaceDown;
+    shiftWasDown = state.polePlant;
   }
 
   function reset() {
     state.anyInput = false;
     spaceWasDown   = false;
+    shiftWasDown   = false;
   }
 
   return { init, update, reset, state };
